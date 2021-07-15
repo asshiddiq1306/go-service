@@ -1,11 +1,14 @@
 package handlers
 
 import (
+	"context"
+	"fmt"
 	"go-service/data"
 	"log"
 	"net/http"
-	"regexp"
 	"strconv"
+
+	"github.com/gorilla/mux"
 )
 
 type Product struct {
@@ -16,45 +19,7 @@ func NewProduct(l *log.Logger) *Product {
 	return &Product{l}
 }
 
-func (p *Product) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		p.getProduct(rw, r)
-		return
-	}
-
-	if r.Method == http.MethodPost {
-		p.addProduct(rw, r)
-		return
-	}
-
-	if r.Method == http.MethodPut {
-		reg := regexp.MustCompile(`/([0-9]+)`)
-		g := reg.FindAllStringSubmatch(r.URL.Path, -1)
-
-		if len(g) != 1 {
-			http.Error(rw, "[ERROR] Invalid URL", http.StatusBadRequest)
-			return
-		}
-
-		if len(g[0]) != 2 {
-			http.Error(rw, "[ERROR] Invalid URL", http.StatusBadRequest)
-			return
-		}
-
-		idString := g[0][1]
-		id, err := strconv.Atoi(idString)
-		if err != nil {
-			http.Error(rw, "[ERROR] Failed to convert id", http.StatusInternalServerError)
-			return
-		}
-
-		p.updateProduct(id, rw, r)
-	}
-
-	rw.WriteHeader(http.StatusMethodNotAllowed)
-}
-
-func (p *Product) getProduct(rw http.ResponseWriter, r *http.Request) {
+func (p *Product) GetProduct(rw http.ResponseWriter, r *http.Request) {
 	p.l.Println("Get list Product")
 	lp := data.GetProduct()
 	err := lp.ToJSON(rw)
@@ -64,26 +29,22 @@ func (p *Product) getProduct(rw http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (p *Product) addProduct(rw http.ResponseWriter, r *http.Request) {
+func (p *Product) AddProduct(rw http.ResponseWriter, r *http.Request) {
 	p.l.Println("Post a new product")
-	prod := data.Product{}
-	err := prod.FromJSON(r.Body)
-	if err != nil {
-		p.l.Println("[ERROR] Decode json failed")
-		http.Error(rw, "[ERROR] Decode json failed", http.StatusBadRequest)
-		return
-	}
+	prod := r.Context().Value(KeyProduct{}).(data.Product)
 	data.AddProduct(&prod)
 }
 
-func (p *Product) updateProduct(id int, rw http.ResponseWriter, r *http.Request) {
+func (p *Product) UpdateProduct(rw http.ResponseWriter, r *http.Request) {
 	p.l.Println("Update a Product")
-	prod := data.Product{}
-	err := prod.FromJSON(r.Body)
+	prod := r.Context().Value(KeyProduct{}).(data.Product)
+	vars := mux.Vars(r)
+	id, err := strconv.Atoi(vars["id"])
 	if err != nil {
-		http.Error(rw, "[ERROR] Faild to read request", http.StatusBadRequest)
+		http.Error(rw, "Failed to convert id", http.StatusBadRequest)
 		return
 	}
+
 	err = data.UpdateProduct(id, &prod)
 	if err == data.ErrorNotFound {
 		http.Error(rw, "Product not found", http.StatusBadRequest)
@@ -94,4 +55,28 @@ func (p *Product) updateProduct(id int, rw http.ResponseWriter, r *http.Request)
 		http.Error(rw, "[ERROR] Failed to update product", http.StatusInternalServerError)
 		return
 	}
+}
+
+type KeyProduct struct{}
+
+func (p *Product) MiddlewareValidation(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		prod := data.Product{}
+		err := prod.FromJSON(r.Body)
+		if err != nil {
+			http.Error(rw, "Error to read request", http.StatusBadRequest)
+			return
+		}
+
+		err = prod.Validate()
+		if err != nil {
+			http.Error(rw, fmt.Sprintf("Invalid input: %s\n", err), http.StatusBadRequest)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), KeyProduct{}, prod)
+		r = r.WithContext(ctx)
+
+		next.ServeHTTP(rw, r)
+	})
 }
